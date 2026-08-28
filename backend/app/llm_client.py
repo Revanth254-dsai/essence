@@ -1,6 +1,7 @@
-
+import asyncio
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 
 import httpx
@@ -11,7 +12,24 @@ logger = logging.getLogger(__name__)
 
 
 class LLMError(Exception):
-    """Any backend failure. Maps to HTTP 503."""
+    pass
+
+
+class _RateLimited(Exception):
+
+    def __init__(self, retry_after: float, detail: str) -> None:
+        super().__init__(detail)
+        self.retry_after = retry_after
+        self.detail = detail
+
+
+MAX_RATE_LIMIT_RETRIES = 4
+
+MAX_RETRY_WAIT_S = 30.0
+
+DEFAULT_RETRY_WAIT_S = 5.0
+
+CHUNK_DELAY_S = 2.0
 
 
 MODE_PROMPTS = {
@@ -66,27 +84,74 @@ def _build_prompt(text: str, mode: str) -> str:
     return f"{MODE_PROMPTS[mode]}\n\n---\n{text}\n---"
 
 
+_RETRY_HINT = re.compile(r"try again in\s+([0-9.]+)\s*s", re.IGNORECASE)
+
+
+def _parse_retry_after(response: httpx.Response, body: str) -> float:
+    header = response.headers.get("retry-after")
+    if header:
+        try:
+            return min(float(header), MAX_RETRY_WAIT_S)
+        except ValueError:
+            pass
+
+    match = _RETRY_HINT.search(body)
+    if match:
+        try:
+            return min(float(match.group(1)), MAX_RETRY_WAIT_S)
+        except ValueError:
+            pass
+
+    return DEFAULT_RETRY_WAIT_S
+
+
 async def stream_completion(prompt: str) -> AsyncIterator[str]:
-    """Yields text deltas as they arrive."""
-    try:
-        if settings.llm_backend == "ollama":
-            async for delta in _stream_ollama(prompt):
-                yield delta
-        else:
-            async for delta in _stream_openai_compatible(prompt):
-                yield delta
-    except LLMError:
-        raise
-    except httpx.TimeoutException as exc:
-        raise LLMError(f"The model timed out after {settings.llm_timeout_s}s.") from exc
-    except httpx.HTTPStatusError as exc:
-        detail = exc.response.text[:300]
-        raise LLMError(
-            f"{settings.llm_backend} returned "
-            f"{exc.response.status_code}: {detail}"
-        ) from exc
-    except httpx.RequestError as exc:
-        raise LLMError(f"Could not reach {settings.llm_backend}: {exc}") from exc
+    attempt = 0
+
+    while True:
+        produced = False
+        try:
+            if settings.llm_backend == "ollama":
+                async for delta in _stream_ollama(prompt):
+                    produced = True
+                    yield delta
+            else:
+                async for delta in _stream_openai_compatible(prompt):
+                    produced = True
+                    yield delta
+            return
+
+        except _RateLimited as exc:
+            if produced or attempt >= MAX_RATE_LIMIT_RETRIES:
+                raise LLMError(
+                    f"{settings.llm_backend} rate limit reached and retries "
+                    f"were exhausted. Try a smaller document, or wait a "
+                    f"minute. Server said: {exc.detail}"
+                ) from exc
+
+            attempt += 1
+            wait = exc.retry_after
+            logger.warning(
+                "rate limited; retry %d/%d in %.1fs",
+                attempt, MAX_RATE_LIMIT_RETRIES, wait,
+            )
+            await asyncio.sleep(wait)
+            continue
+
+        except LLMError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise LLMError(
+                f"The model timed out after {settings.llm_timeout_s}s."
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text[:300]
+            raise LLMError(
+                f"{settings.llm_backend} returned "
+                f"{exc.response.status_code}: {detail}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise LLMError(f"Could not reach {settings.llm_backend}: {exc}") from exc
 
 
 async def _stream_openai_compatible(prompt: str) -> AsyncIterator[str]:
@@ -109,6 +174,11 @@ async def _stream_openai_compatible(prompt: str) -> AsyncIterator[str]:
             headers={"Authorization": f"Bearer {api_key}"},
             json=payload,
         ) as response:
+            if response.status_code == 429:
+                await response.aread()
+                body = response.text[:300]
+                raise _RateLimited(_parse_retry_after(response, body), body)
+
             if response.status_code >= 400:
                 await response.aread()
                 response.raise_for_status()
@@ -179,7 +249,6 @@ async def complete(prompt: str) -> str:
 async def summarize_chunks(
     chunks: list[str], mode: str
 ) -> AsyncIterator[str]:
-    """Map-reduce over chunks, streaming only the final reduce step."""
     if len(chunks) == 1:
         async for delta in stream_completion(_build_prompt(chunks[0], mode)):
             yield delta
@@ -190,6 +259,9 @@ async def summarize_chunks(
     digests: list[str] = []
 
     for index, chunk in enumerate(chunks, start=1):
+        if index > 1:
+            await asyncio.sleep(CHUNK_DELAY_S)
+
         digest = await complete(f"{CHUNK_PROMPT}\n\n---\n{chunk}\n---")
         digests.append(f"[Section {index}]\n{digest}")
 
