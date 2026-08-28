@@ -17,7 +17,10 @@ class Settings(BaseSettings):
     llm_backend: Literal["groq", "ollama", "openai"] = "groq"
 
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    # llama-3.3-70b-versatile was deprecated by Groq on 2026-06-17 and is now
+    # decommissioned (404 model_not_found). openai/gpt-oss-120b is the
+    # recommended replacement; openai/gpt-oss-20b is the cheaper option.
+    groq_model: str = "openai/gpt-oss-120b"
     groq_base_url: str = "https://api.groq.com/openai/v1"
 
     openai_api_key: str = ""

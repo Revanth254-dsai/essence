@@ -1,11 +1,7 @@
 import { useEffect, useState } from "react";
+
 import { SourceBadge } from "./SummaryPanel";
 
-/**
- * ts_headline returns [[HL]]...[[/HL]] markers rather than <mark> tags,
- * because the summary text is model-generated and rendering it as raw HTML
- * would be an injection path. We split on the markers and build elements.
- */
 function Highlighted({ text }) {
   const parts = String(text ?? "").split(/\[\[HL\]\]|\[\[\/HL\]\]/);
   return (
@@ -68,7 +64,6 @@ export default function ArchiveSidebar({
 }) {
   const [draft, setDraft] = useState(query);
 
-  // Debounce so a GIN lookup doesn't fire on every keystroke.
   useEffect(() => {
     const timer = setTimeout(() => onQueryChange(draft), 250);
     return () => clearTimeout(timer);
@@ -85,7 +80,6 @@ export default function ArchiveSidebar({
             </span>
           )}
         </div>
-
         <input
           className="field text-sm"
           type="search"
@@ -93,14 +87,12 @@ export default function ArchiveSidebar({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
         />
-
         {query && (
           <p className="font-mono text-[11px] text-muted">
             {total} match{total === 1 ? "" : "es"} for “{query}”
           </p>
         )}
       </div>
-
       <div className="flex-1 overflow-y-auto px-2 pb-4 space-y-1">
         {items.length === 0 ? (
           <p className="text-sm text-muted px-3 py-6 leading-relaxed">
@@ -119,7 +111,6 @@ export default function ArchiveSidebar({
           ))
         )}
       </div>
-
       {query && (
         <div className="px-4 py-2.5 border-t border-rule">
           <p className="font-mono text-[10px] text-muted leading-relaxed">

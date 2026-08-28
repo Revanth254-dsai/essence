@@ -1,9 +1,4 @@
-"""LLM access: one interface, three backends, streaming and non-streaming.
 
-Every backend failure is normalised to LLMError so the API layer has exactly
-one exception to catch. v2 leaked raw httpx/requests exceptions as 500s
-because requests.exceptions.ConnectionError is not the builtin ConnectionError.
-"""
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -58,8 +53,10 @@ def _openai_compatible_config() -> tuple[str, str, str]:
         if not settings.groq_api_key:
             raise LLMError("GROQ_API_KEY is not set. Add it to backend/.env.")
         return settings.groq_base_url, settings.groq_api_key, settings.groq_model
+
     if not settings.openai_api_key:
         raise LLMError("OPENAI_API_KEY is not set. Add it to backend/.env.")
+
     return settings.openai_base_url, settings.openai_api_key, settings.openai_model
 
 
@@ -68,10 +65,6 @@ def _build_prompt(text: str, mode: str) -> str:
         raise LLMError(f"Unknown mode '{mode}'. Use: {', '.join(MODE_PROMPTS)}")
     return f"{MODE_PROMPTS[mode]}\n\n---\n{text}\n---"
 
-
-# --------------------------------------------------------------------------
-# streaming
-# --------------------------------------------------------------------------
 
 async def stream_completion(prompt: str) -> AsyncIterator[str]:
     """Yields text deltas as they arrive."""
@@ -88,8 +81,10 @@ async def stream_completion(prompt: str) -> AsyncIterator[str]:
         raise LLMError(f"The model timed out after {settings.llm_timeout_s}s.") from exc
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text[:300]
-        raise LLMError(f"{settings.llm_backend} returned "
-                       f"{exc.response.status_code}: {detail}") from exc
+        raise LLMError(
+            f"{settings.llm_backend} returned "
+            f"{exc.response.status_code}: {detail}"
+        ) from exc
     except httpx.RequestError as exc:
         raise LLMError(f"Could not reach {settings.llm_backend}: {exc}") from exc
 
@@ -121,17 +116,24 @@ async def _stream_openai_compatible(prompt: str) -> AsyncIterator[str]:
             async for line in response.aiter_lines():
                 if not line.startswith("data:"):
                     continue
+
                 data = line[5:].strip()
+
                 if data == "[DONE]":
                     return
+
                 try:
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+
                 choices = chunk.get("choices") or []
+
                 if not choices:
                     continue
+
                 delta = choices[0].get("delta", {}).get("content")
+
                 if delta:
                     yield delta
 
@@ -142,9 +144,12 @@ async def _stream_ollama(prompt: str) -> AsyncIterator[str]:
         "prompt": f"{SYSTEM_PROMPT}\n\n{prompt}",
         "stream": True,
     }
+
     async with httpx.AsyncClient(timeout=settings.llm_timeout_s) as client:
         async with client.stream(
-            "POST", f"{settings.ollama_base_url}/api/generate", json=payload
+            "POST",
+            f"{settings.ollama_base_url}/api/generate",
+            json=payload,
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
@@ -153,43 +158,42 @@ async def _stream_ollama(prompt: str) -> AsyncIterator[str]:
             async for line in response.aiter_lines():
                 if not line.strip():
                     continue
+
                 try:
                     chunk = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+
                 if chunk.get("response"):
                     yield chunk["response"]
+
                 if chunk.get("done"):
                     return
 
-
-# --------------------------------------------------------------------------
-# non-streaming (used for the map step)
-# --------------------------------------------------------------------------
 
 async def complete(prompt: str) -> str:
     parts = [delta async for delta in stream_completion(prompt)]
     return "".join(parts).strip()
 
 
-async def summarize_chunks(chunks: list[str], mode: str) -> AsyncIterator[str]:
-    """Map-reduce over chunks, streaming only the final reduce step.
-
-    One chunk: summarise directly. Many: condense each, then summarise the
-    condensed digests. The user sees tokens from the step that produces the
-    text they actually read.
-    """
+async def summarize_chunks(
+    chunks: list[str], mode: str
+) -> AsyncIterator[str]:
+    """Map-reduce over chunks, streaming only the final reduce step."""
     if len(chunks) == 1:
         async for delta in stream_completion(_build_prompt(chunks[0], mode)):
             yield delta
         return
 
     logger.info("map-reduce over %d chunks", len(chunks))
+
     digests: list[str] = []
+
     for index, chunk in enumerate(chunks, start=1):
         digest = await complete(f"{CHUNK_PROMPT}\n\n---\n{chunk}\n---")
         digests.append(f"[Section {index}]\n{digest}")
 
     combined = "\n\n".join(digests)
+
     async for delta in stream_completion(_build_prompt(combined, mode)):
         yield delta

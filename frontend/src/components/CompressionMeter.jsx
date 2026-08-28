@@ -1,11 +1,6 @@
 const format = (n) =>
   n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 
-/**
- * The one thing this app does is make long things short, so the interface
- * shows that measurement directly rather than describing it. The lower bar
- * is drawn to true scale against the upper one.
- */
 export default function CompressionMeter({ sourceChars, summaryChars }) {
   if (!sourceChars) return null;
 

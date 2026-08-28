@@ -27,18 +27,43 @@ def _read_pdf(body: bytes) -> tuple[str, str]:
         except Exception as exc:
             raise IngestionError("This PDF is password protected.") from exc
 
-    pages = reader.pages[:MAX_PAGES]
-    text = "\n\n".join(page.extract_text() or "" for page in pages)
+    try:
+        pages = reader.pages[:MAX_PAGES]
+    except Exception as exc:
+        raise IngestionError(f"Could not read the page tree: {exc}") from exc
+
+    # Extract per page. A single malformed page should not kill the document.
+    extracted: list[str] = []
+    failed = 0
+    for index, page in enumerate(pages, start=1):
+        try:
+            extracted.append(page.extract_text() or "")
+        except Exception as exc:
+            failed += 1
+            logger.warning("pdf: page %d failed to extract: %s", index, exc)
+
+    if failed:
+        logger.warning("pdf: %d of %d pages failed", failed, len(pages))
+
+    text = "\n\n".join(extracted)
 
     if not text.strip():
+        if failed:
+            raise IngestionError(
+                "Every page in this PDF failed to parse. It may be corrupt "
+                "or use an unsupported encoding."
+            )
         raise IngestionError(
             "No selectable text in this PDF. It is probably a scan - "
             "run OCR on it first."
         )
 
     title = ""
-    if reader.metadata and reader.metadata.title:
-        title = str(reader.metadata.title).strip()
+    try:
+        if reader.metadata and reader.metadata.title:
+            title = str(reader.metadata.title).strip()
+    except Exception as exc:
+        logger.warning("pdf: could not read metadata: %s", exc)
 
     return title, text
 
